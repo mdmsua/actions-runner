@@ -1,0 +1,133 @@
+---
+- name: github actions runner
+  hosts: all
+  vars:
+    actions_runner_version: 2.276.0
+  tasks:
+  - name: ensure essential packages
+    apt:
+      name:
+        - ca-certificates
+        - apt-transport-https
+        - gnupg
+        - gnupg-agent
+        - software-properties-common
+      state: present
+  - name: ensure microsoft apt key
+    apt_key:
+      url: https://packages.microsoft.com/keys/microsoft.asc
+      state: present
+  - name: ensure microsoft apt repositories
+    apt_repository:
+      repo: "{{ item }}"
+      state: present
+    loop:
+      - "deb [arch=amd64] https://packages.microsoft.com/ubuntu/{{ ansible_distribution_version }}/prod {{ ansible_distribution_release }} main"
+      - "deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ {{ ansible_distribution_release }} main"
+  - name: ensure dotnet sdk, powershell and azure cli
+    apt:
+      name:
+        - dotnet-sdk-5.0
+        - powershell
+        - azure-cli
+      update_cache: yes
+      autoclean: yes
+      autoremove: yes
+      state: latest
+  - name: check if az powershell module is installed
+    shell:
+      cmd: "(Get-InstalledModule -Name Az -ErrorAction SilentlyContinue).Version"
+      executable: pwsh
+    register: azversion
+  - name: install az powershell module if not installed
+    shell:
+      cmd: "Install-Module -Name Az -AcceptLicense -AllowClobber -Force -Scope AllUsers -SkipPublisherCheck"
+      executable: pwsh
+    when: azversion.stdout is falsy
+  - name: update az powershell module if already installed
+    shell:
+      cmd: "Update-Module -Name Az -AcceptLicense -Force -Scope AllUsers"
+      executable: pwsh
+    when: azversion.stdout is truthy
+  - name: ensure docker docker-engine docker.io containerd runc are not installed
+    apt:
+      name:
+        - docker
+        - docker-engine
+        - docker.io
+        - containerd
+        - runc
+      state: absent
+  - name: ensure docker apt key
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+  - name: ensure docker apt repository
+    apt_repository:
+      repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+      state: present
+  - name: ensure docker-ce docker-ce-cli containerd.io are installed
+    apt:
+      name:
+        - docker-ce
+        - docker-ce-cli
+        - containerd.io
+      update_cache: yes
+      autoclean: yes
+      autoremove: yes
+      state: latest
+  - name: ensure github user
+    user:
+      name: github
+      system: yes
+      groups:
+        - docker
+        - sudo
+      append: yes
+      password: "{{ user_password | password_hash('sha512') }}"
+      state: present
+  - name: ensure actions runner folder exists
+    file:
+      path: /home/github/actions-runner
+      state: directory
+      recurse: yes
+      owner: github
+  - name: download actions runner
+    get_url:
+      url: "https://github.com/actions/runner/releases/download/v{{ actions_runner_version }}/actions-runner-linux-x64-{{ actions_runner_version }}.tar.gz"
+      dest: /home/github
+      owner: github
+    register: archive
+  - name: stat svc.sh
+    stat:
+      path: "/home/github/actions-runner/svc.sh"
+    register: svcsh
+    when: archive.changed
+  - name: stop service
+    shell:
+      cmd: "./svc.sh stop"
+      chdir: /home/github/actions-runner
+    when: archive.changed and svcsh.stat.exists
+  - name: unpack actions runner
+    unarchive:
+      src: "/home/github/actions-runner-linux-x64-{{ actions_runner_version }}.tar.gz"
+      dest: /home/github/actions-runner
+      remote_src: yes
+      owner: github
+    when: archive.changed
+  - name: configure actions runner
+    shell:
+      cmd: "./config.sh --unattended --url https://github.com/{{ github_repo }} --token {{ actions_runner_token }}"
+      chdir: /home/github/actions-runner
+    become_user: github
+    when: archive.changed and svcsh.stat.exists == False
+  - name: install actions runner service
+    shell:
+      cmd: "./svc.sh install github"
+      chdir: /home/github/actions-runner
+    when: archive.changed and svcsh.stat.exists == False
+  - name: start actions runner service
+    shell:
+      cmd: "./svc.sh start"
+      chdir: /home/github/actions-runner
+    when: archive.changed
